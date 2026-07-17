@@ -23,7 +23,6 @@ jobs:
       DEVICE: a52xq
       DEVICE_TREE: /home/runner/fox_12.1/device/samsung/a52xq
       PARTITION_SIZE: "81788928"
-      CCACHE_DIR: /home/runner/.ccache
 
     steps:
       - name: Checkout R12 builder overlay
@@ -60,21 +59,6 @@ jobs:
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
           chmod 0755 "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
-
-      - name: Configure ccache
-        run: |
-          ccache --max-size=8G
-          ccache --set-config=compression=true
-          echo "USE_CCACHE=1" >> "$GITHUB_ENV"
-          echo "CCACHE_EXEC=$(command -v ccache)" >> "$GITHUB_ENV"
-
-      - name: Cache compiler output
-        uses: actions/cache@v4
-        with:
-          path: /home/runner/.ccache
-          key: ofox-a52xq-12.1-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            ofox-a52xq-12.1-${{ runner.os }}-
 
       - name: Sync current OrangeFox 12.1 source
         shell: bash
@@ -152,6 +136,11 @@ jobs:
           export LC_ALL=C
           export OF_DISABLE_MIUI_SPECIFIC_FEATURES=1
           export OF_FORCE_PREBUILT_KERNEL=1
+
+          # The previous runner restored /home/runner/.ccache as read-only.
+          # Disable ccache completely for a reliable first successful build.
+          export USE_CCACHE=0
+          unset CCACHE_DIR CCACHE_TEMPDIR CCACHE_EXEC
 
           test -f build/envsetup.sh
           test -f "$DEVICE_TREE/AndroidProducts.mk"
