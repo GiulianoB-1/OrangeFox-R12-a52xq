@@ -48,6 +48,12 @@ jobs:
             pngcrush python3 python-is-python3 rsync schedtool \
             squashfs-tools unzip wget xsltproc xz-utils zip zlib1g-dev
 
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global init.defaultBranch main
+
       - name: Install repo tool
         run: |
           mkdir -p "$HOME/bin"
@@ -74,17 +80,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth=1 https://gitlab.com/OrangeFox/sync.git "$HOME/OrangeFox_sync"
-          cd "$HOME/OrangeFox_sync"
+          mkdir -p "$HOME/OrangeFox_sync"
+          git clone --depth=1 https://gitlab.com/OrangeFox/sync.git "$HOME/OrangeFox_sync/sync"
+          cd "$HOME/OrangeFox_sync/sync"
           ./orangefox_sync.sh --branch "$FOX_BRANCH" --path "$FOX_DIR"
+          test -f "$FOX_DIR/build/envsetup.sh"
           df -h
 
       - name: Clone proven A52 5G device tree
+        shell: bash
         run: |
+          set -euo pipefail
           rm -rf "$DEVICE_TREE"
+          git lfs install
           git clone --depth=1 --branch fox_12.1 \
             https://github.com/itsaschoolbus-stuff/fox_device_samsung_a52xq.git \
             "$DEVICE_TREE"
+          git -C "$DEVICE_TREE" lfs pull || true
           git -C "$DEVICE_TREE" log -1 --oneline
 
       - name: Apply working MicroSD and USB-OTG fixes
@@ -98,19 +110,55 @@ jobs:
           echo "----- Patched properties -----"
           grep -nE 'isUsbOtgEnabled|oem.otg_support' "$DEVICE_TREE/system.prop"
 
+      - name: Validate device-tree build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "Device tree commit:"
+            git -C "$DEVICE_TREE" log -1 --oneline
+            echo
+            echo "Android product files:"
+            sed -n '1,120p' "$DEVICE_TREE/AndroidProducts.mk"
+            echo
+            echo "Prebuilt image details:"
+            for file in \
+              "$DEVICE_TREE/prebuilt/Image.gz" \
+              "$DEVICE_TREE/prebuilt/dtb.img" \
+              "$DEVICE_TREE/prebuilt/dtbo.img"; do
+              test -s "$file"
+              wc -c "$file"
+              file "$file"
+              if head -c 200 "$file" | grep -q 'git-lfs.github.com/spec'; then
+                echo "ERROR: $file is still a Git LFS pointer"
+                exit 1
+              fi
+            done
+          } | tee "$GITHUB_WORKSPACE/tree-info.txt"
+
       - name: Build OrangeFox recovery image
         shell: bash
         run: |
-          set -o pipefail
+          LOG="$GITHUB_WORKSPACE/build.log"
+          : > "$LOG"
+          exec > >(tee -a "$LOG") 2>&1
+          set -ex
+          trap 'status=$?; if [ "$status" -ne 0 ]; then echo "::error::OrangeFox build setup or compilation failed with exit code $status"; tail -n 160 "$LOG"; fi; exit "$status"' EXIT
+
           cd "$FOX_DIR"
           export ALLOW_MISSING_DEPENDENCIES=true
           export FOX_BUILD_DEVICE="$DEVICE"
           export LC_ALL=C
           export OF_DISABLE_MIUI_SPECIFIC_FEATURES=1
           export OF_FORCE_PREBUILT_KERNEL=1
+
+          test -f build/envsetup.sh
+          test -f "$DEVICE_TREE/AndroidProducts.mk"
           source build/envsetup.sh
           lunch twrp_a52xq-eng
-          mka adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          mka adbd recoveryimage
+
+          trap - EXIT
 
       - name: Collect and verify build outputs
         shell: bash
@@ -144,11 +192,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload full build log
+      - name: Upload diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: OrangeFox-R12-a52xq-build-log-${{ github.run_number }}
-          path: build.log
+          name: OrangeFox-R12-a52xq-diagnostics-${{ github.run_number }}
+          path: |
+            build.log
+            tree-info.txt
           if-no-files-found: warn
           retention-days: 14
