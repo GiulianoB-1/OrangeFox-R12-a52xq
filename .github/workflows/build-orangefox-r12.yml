@@ -75,7 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth=1 https://gitlab.com/OrangeFox/sync.git "$HOME/OrangeFox_sync"
-          cd "$HOME/OrangeFox_sync/sync"
+          cd "$HOME/OrangeFox_sync"
           ./orangefox_sync.sh --branch "$FOX_BRANCH" --path "$FOX_DIR"
           df -h
 
