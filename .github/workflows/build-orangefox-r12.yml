@@ -142,8 +142,9 @@ jobs:
           LOG="$GITHUB_WORKSPACE/build.log"
           : > "$LOG"
           exec > >(tee -a "$LOG") 2>&1
-          set -ex
-          trap 'status=$?; if [ "$status" -ne 0 ]; then echo "::error::OrangeFox build setup or compilation failed with exit code $status"; tail -n 160 "$LOG"; fi; exit "$status"' EXIT
+          set -x
+          set -o pipefail
+          trap 'status=$?; if [ "$status" -ne 0 ]; then echo "::error::OrangeFox build setup or compilation failed with exit code $status"; tail -n 200 "$LOG"; fi; exit "$status"' EXIT
 
           cd "$FOX_DIR"
           export ALLOW_MISSING_DEPENDENCIES=true
@@ -154,7 +155,17 @@ jobs:
 
           test -f build/envsetup.sh
           test -f "$DEVICE_TREE/AndroidProducts.mk"
+
+          # Android envsetup scripts can return a non-zero status from harmless
+          # capability tests. Do not use `set -e` while sourcing them.
+          set +e
           source build/envsetup.sh
+          ENVSETUP_STATUS=$?
+          set -e
+          echo "build/envsetup.sh returned $ENVSETUP_STATUS; validating loaded functions"
+          type lunch
+          type mka
+
           lunch twrp_a52xq-eng
           mka adbd recoveryimage
 
