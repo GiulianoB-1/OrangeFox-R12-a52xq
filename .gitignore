@@ -1,0 +1,6 @@
+output/
+build.log
+verification.txt
+SHA256SUMS.txt
+*.img
+*.zip
