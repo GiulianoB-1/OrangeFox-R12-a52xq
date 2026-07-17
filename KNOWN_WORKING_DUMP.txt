@@ -1,0 +1,11 @@
+Known-working recovery reference
+================================
+Hardware: Samsung Galaxy A52 5G
+Codename: a52xq
+Recovery version: OrangeFox R11.3
+Recovery image SHA-256:
+4e866746a06757c5dbcc5346802d3baf50b4d91d9d7124d722069910689ef69b
+Recovery partition size: 81788928 bytes
+
+The custom ROM reports r0q / SM-S901E, but that is spoofed ROM identity and
+must not be used to select a recovery image.
