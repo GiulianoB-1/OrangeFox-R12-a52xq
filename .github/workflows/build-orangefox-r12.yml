@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: orangefox-a52xq-${{ github.ref }}
@@ -23,6 +24,10 @@ jobs:
       DEVICE: a52xq
       DEVICE_TREE: /home/runner/fox_12.1/device/samsung/a52xq
       PARTITION_SIZE: "81788928"
+      KERNEL_REPO: GiulianoB-1/A52-touchGrass-4.19.325-SukiSU
+      KERNEL_RUN_ID: "34974949126"
+      KERNEL_ARTIFACT: A52XQ-4.19.206-FUSE-MODERN-P2-BT-P2B-GPU-P5-BBR3-WIFI-RMNET-FQ-VULKAN-RE-CLANG11-2
+      KERNEL_IMAGE_SHA256: ac89ceaea37bf3b516b37308b29fb89b1c4c472f92d3569df97a0d7376781256
 
     steps:
       - name: Checkout R12 builder overlay
@@ -71,6 +76,12 @@ jobs:
           test -f "$FOX_DIR/build/envsetup.sh"
           df -h
 
+      - name: Apply APEX loop and recovery-restart fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./scripts/patch-apex-loop.sh "$FOX_DIR"
+
       - name: Clone proven A52 5G device tree
         shell: bash
         run: |
@@ -82,6 +93,61 @@ jobs:
             "$DEVICE_TREE"
           git -C "$DEVICE_TREE" lfs pull || true
           git -C "$DEVICE_TREE" log -1 --oneline
+
+      - name: Inject exact kernel from run 34974949126
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          KDIR="$RUNNER_TEMP/recovery-kernel-$KERNEL_RUN_ID"
+          rm -rf "$KDIR"
+          mkdir -p "$KDIR"
+
+          echo "Downloading kernel artifact '$KERNEL_ARTIFACT' from $KERNEL_REPO run $KERNEL_RUN_ID"
+          gh run download "$KERNEL_RUN_ID" \
+            --repo "$KERNEL_REPO" \
+            --name "$KERNEL_ARTIFACT" \
+            --dir "$KDIR"
+
+          INNER_ZIP="$(find "$KDIR" -maxdepth 1 -type f -name '*.zip' | head -n1)"
+          if [[ -z "$INNER_ZIP" ]]; then
+            echo "ERROR: AnyKernel ZIP not found in downloaded artifact" >&2
+            find "$KDIR" -maxdepth 2 -type f -print
+            exit 1
+          fi
+
+          unzip -p "$INNER_ZIP" Image > "$KDIR/Image"
+          test -s "$KDIR/Image"
+
+          ACTUAL_SHA="$(sha256sum "$KDIR/Image" | awk '{print $1}')"
+          echo "Kernel Image SHA256: $ACTUAL_SHA"
+          if [[ "$ACTUAL_SHA" != "$KERNEL_IMAGE_SHA256" ]]; then
+            echo "ERROR: kernel Image SHA mismatch" >&2
+            echo "expected=$KERNEL_IMAGE_SHA256" >&2
+            echo "actual=$ACTUAL_SHA" >&2
+            exit 1
+          fi
+
+          KERNEL_RELEASE="$(strings "$KDIR/Image" | grep -m1 '^Linux version ' || true)"
+          echo "$KERNEL_RELEASE"
+          if [[ "$KERNEL_RELEASE" != *"4.19.206-touchGrassKernel+"* ]]; then
+            echo "ERROR: unexpected kernel release string in exact run artifact" >&2
+            exit 1
+          fi
+
+          gzip -n -9 -c "$KDIR/Image" > "$DEVICE_TREE/prebuilt/Image.gz"
+          test -s "$DEVICE_TREE/prebuilt/Image.gz"
+
+          {
+            echo "source_repo=$KERNEL_REPO"
+            echo "source_run=$KERNEL_RUN_ID"
+            echo "artifact=$KERNEL_ARTIFACT"
+            echo "raw_image_sha256=$ACTUAL_SHA"
+            echo "kernel_release=$KERNEL_RELEASE"
+            echo "recovery_prebuilt_sha256=$(sha256sum "$DEVICE_TREE/prebuilt/Image.gz" | awk '{print $1}')"
+          } | tee "$GITHUB_WORKSPACE/kernel-provenance.txt"
 
       - name: Apply working MicroSD and USB-OTG fixes
         run: |
@@ -104,6 +170,9 @@ jobs:
             echo
             echo "Android product files:"
             sed -n '1,120p' "$DEVICE_TREE/AndroidProducts.mk"
+            echo
+            echo "Kernel provenance:"
+            cat "$GITHUB_WORKSPACE/kernel-provenance.txt"
             echo
             echo "Prebuilt image details:"
             for file in \
@@ -200,5 +269,6 @@ jobs:
           path: |
             build.log
             tree-info.txt
+            kernel-provenance.txt
           if-no-files-found: warn
           retention-days: 14
