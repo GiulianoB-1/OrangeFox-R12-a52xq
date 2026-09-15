@@ -79,11 +79,11 @@ if old in text:
 elif 'unable to determine apex image size' not in text:
     raise SystemExit("ERROR: loadApexImage() size block changed; refusing an unsafe patch")
 
-# Keep twrp.apex.loaded coherent when TWRP explicitly tears APEX down.
-old_unmount = '''bool twrpApex::Unmount() {
-	return (PartitionManager.UnMount_By_Path(APEX_BASE, false, MNT_DETACH) == 0);
-}
-'''
+# Keep twrp.apex.loaded coherent when OrangeFox explicitly tears APEX down.
+# OrangeFox's Unmount() body differs slightly from TeamWin's 12.1 tree, so
+# replace the single complete function structurally instead of byte-matching
+# one exact return statement.
+import re
 new_unmount = '''bool twrpApex::Unmount() {
 	bool result = (PartitionManager.UnMount_By_Path(APEX_BASE, false, MNT_DETACH) == 0);
 	if (result) {
@@ -92,10 +92,18 @@ new_unmount = '''bool twrpApex::Unmount() {
 	return result;
 }
 '''
-if old_unmount in text:
-    text = text.replace(old_unmount, new_unmount, 1)
-elif 'android::base::SetProperty("twrp.apex.loaded", "false")' not in text:
-    raise SystemExit("ERROR: Unmount() layout changed; refusing an unsafe patch")
+if 'android::base::SetProperty("twrp.apex.loaded", "false")' not in text:
+    matches = list(re.finditer(
+        r'bool\s+twrpApex::Unmount\(\)\s*\{.*?\n\}',
+        text,
+        flags=re.S,
+    ))
+    if len(matches) != 1:
+        raise SystemExit(
+            f"ERROR: expected exactly one twrpApex::Unmount() function, found {len(matches)}"
+        )
+    m = matches[0]
+    text = text[:m.start()] + new_unmount.rstrip() + text[m.end():]
 
 required = [
     'loadApexImage(fileToMount, num)',
