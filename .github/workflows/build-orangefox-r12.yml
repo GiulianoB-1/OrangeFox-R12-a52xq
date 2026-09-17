@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: orangefox-a52xq-${{ github.ref }}
@@ -23,6 +24,9 @@ jobs:
       DEVICE: a52xq
       DEVICE_TREE: /home/runner/fox_12.1/device/samsung/a52xq
       PARTITION_SIZE: "81788928"
+      KERNEL_REPO: GiulianoB-1/A52-touchGrass-4.19.325-SukiSU
+      KERNEL_RUN_ID: "32509295678"
+      KERNEL_ARTIFACT: a52xq-recovery-preserve-ramoops-3-KERNEL
 
     steps:
       - name: Checkout R12 builder overlay
@@ -88,6 +92,115 @@ jobs:
           git -C "$DEVICE_TREE" lfs pull || true
           git -C "$DEVICE_TREE" log -1 --oneline
 
+      - name: Inject 4.19.206 ramoops-preservation recovery kernel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          KDIR="$RUNNER_TEMP/recovery-preserve-kernel-$KERNEL_RUN_ID"
+          rm -rf "$KDIR"
+          mkdir -p "$KDIR"
+
+          echo "Waiting for exact preservation-kernel run $KERNEL_REPO/$KERNEL_RUN_ID"
+          status=""
+          conclusion=""
+          for n in $(seq 1 180); do
+            status="$(gh api "repos/$KERNEL_REPO/actions/runs/$KERNEL_RUN_ID" --jq '.status')"
+            conclusion="$(gh api "repos/$KERNEL_REPO/actions/runs/$KERNEL_RUN_ID" --jq '.conclusion // ""')"
+            attempt="$(gh api "repos/$KERNEL_REPO/actions/runs/$KERNEL_RUN_ID" --jq '.run_attempt')"
+            echo "kernel run: attempt=$attempt status=$status conclusion=${conclusion:-pending}"
+            if [[ "$status" == "completed" ]]; then
+              [[ "$conclusion" == "success" ]] || {
+                echo "ERROR: preservation-kernel run completed with $conclusion" >&2
+                exit 1
+              }
+              break
+            fi
+            sleep 30
+          done
+          [[ "$status" == "completed" && "$conclusion" == "success" ]] || {
+            echo "ERROR: timed out waiting for preservation-kernel run" >&2
+            exit 1
+          }
+
+          echo "Downloading '$KERNEL_ARTIFACT' from $KERNEL_REPO run $KERNEL_RUN_ID"
+          gh run download "$KERNEL_RUN_ID" \
+            --repo "$KERNEL_REPO" \
+            --name "$KERNEL_ARTIFACT" \
+            --dir "$KDIR"
+
+          IMAGE_GZ="$(find "$KDIR" -type f -name Image.gz -print -quit)"
+          IMAGE_RAW="$(find "$KDIR" -type f -name Image -print -quit)"
+          FINAL_CONFIG="$(find "$KDIR" -type f -name final.config -print -quit)"
+          AUDIT="$(find "$KDIR" -type f -name preservation-audit.json -print -quit)"
+
+          test -n "$IMAGE_GZ" && test -s "$IMAGE_GZ"
+          test -n "$FINAL_CONFIG" && test -s "$FINAL_CONFIG"
+          test -n "$AUDIT" && test -s "$AUDIT"
+          gzip -t "$IMAGE_GZ"
+
+          if [[ -z "$IMAGE_RAW" || ! -s "$IMAGE_RAW" ]]; then
+            IMAGE_RAW="$KDIR/Image.decoded"
+            gzip -dc "$IMAGE_GZ" > "$IMAGE_RAW"
+          fi
+
+          python3 - "$AUDIT" <<'PY'
+          import json, sys
+          p = sys.argv[1]
+          d = json.load(open(p))
+          if d.get('status') != 'passed':
+              raise SystemExit('preservation audit did not pass')
+          if d.get('preserved_range') != '0xB1B00000-0xB1BFFFFF':
+              raise SystemExit('unexpected preserved ramoops range')
+          required = (
+              'snapshot_marker_in_image',
+              'device_marker_in_image',
+              'pstore_ram_disabled',
+              'pstore_console_disabled',
+              'pstore_pmsg_disabled',
+          )
+          bad = [k for k in required if not d.get('checks', {}).get(k)]
+          if bad:
+              raise SystemExit('preservation audit checks failed: ' + ', '.join(bad))
+          print('preservation-audit.json: PASS')
+          PY
+
+          grep -Fxq 'CONFIG_PSTORE=y' "$FINAL_CONFIG"
+          grep -Fxq '# CONFIG_PSTORE_RAM is not set' "$FINAL_CONFIG"
+          grep -Fxq '# CONFIG_PSTORE_CONSOLE is not set' "$FINAL_CONFIG"
+          grep -Fxq '# CONFIG_PSTORE_PMSG is not set' "$FINAL_CONFIG"
+
+          grep -aFq 'a52_ramoops_raw: captured 0x%llx-0x%llx before ramoops init' "$IMAGE_RAW"
+          grep -aFq '/dev/a52_ramoops_raw ready, size=%u' "$IMAGE_RAW"
+
+          KERNEL_RELEASE="$(strings "$IMAGE_RAW" | grep -m1 '^Linux version ' || true)"
+          echo "$KERNEL_RELEASE"
+          [[ "$KERNEL_RELEASE" == *"4.19.206"* ]] || {
+            echo "ERROR: expected Linux 4.19.206 preservation kernel" >&2
+            exit 1
+          }
+
+          cp -f "$IMAGE_GZ" "$DEVICE_TREE/prebuilt/Image.gz"
+          gzip -t "$DEVICE_TREE/prebuilt/Image.gz"
+
+          RAW_SHA="$(sha256sum "$IMAGE_RAW" | awk '{print $1}')"
+          GZ_SHA="$(sha256sum "$DEVICE_TREE/prebuilt/Image.gz" | awk '{print $1}')"
+          {
+            echo "source_repo=$KERNEL_REPO"
+            echo "source_run=$KERNEL_RUN_ID"
+            echo "artifact=$KERNEL_ARTIFACT"
+            echo "kernel_release=$KERNEL_RELEASE"
+            echo "raw_image_sha256=$RAW_SHA"
+            echo "recovery_prebuilt_sha256=$GZ_SHA"
+            echo "preserved_range=0xB1B00000-0xB1BFFFFF"
+            echo "a52_ramoops_raw=yes"
+            echo "pstore_ram=disabled"
+            echo "pstore_console=disabled"
+            echo "pstore_pmsg=disabled"
+          } | tee "$GITHUB_WORKSPACE/kernel-provenance.txt"
+
       - name: Apply working MicroSD and USB-OTG fixes
         run: |
           bash ./scripts/patch-device-tree.sh "$DEVICE_TREE"
@@ -107,11 +220,18 @@ jobs:
             echo "Device tree commit:"
             git -C "$DEVICE_TREE" log -1 --oneline
             echo
-            echo "Android product files:"
-            sed -n '1,120p' "$DEVICE_TREE/AndroidProducts.mk"
+            echo "Kernel provenance:"
+            cat "$GITHUB_WORKSPACE/kernel-provenance.txt"
             echo
             echo "Recovery kernel:"
-            gzip -dc "$DEVICE_TREE/prebuilt/Image.gz" | strings | grep -m1 '^Linux version ' || true
+            RECOVERY_KERNEL="$(gzip -dc "$DEVICE_TREE/prebuilt/Image.gz" | strings | grep -m1 '^Linux version ' || true)"
+            echo "$RECOVERY_KERNEL"
+            [[ "$RECOVERY_KERNEL" == *"4.19.206"* ]]
+            gzip -dc "$DEVICE_TREE/prebuilt/Image.gz" | grep -aFq 'a52_ramoops_raw: captured 0x%llx-0x%llx before ramoops init'
+            gzip -dc "$DEVICE_TREE/prebuilt/Image.gz" | grep -aFq '/dev/a52_ramoops_raw ready, size=%u'
+            EXPECTED_GZ_SHA="$(awk -F= '$1=="recovery_prebuilt_sha256" {print $2}' "$GITHUB_WORKSPACE/kernel-provenance.txt")"
+            ACTUAL_GZ_SHA="$(sha256sum "$DEVICE_TREE/prebuilt/Image.gz" | awk '{print $1}')"
+            [[ -n "$EXPECTED_GZ_SHA" && "$EXPECTED_GZ_SHA" == "$ACTUAL_GZ_SHA" ]]
             echo
             echo "Prebuilt image details:"
             for file in \
@@ -197,6 +317,7 @@ jobs:
             output/*
             SHA256SUMS.txt
             verification.txt
+            kernel-provenance.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -208,5 +329,6 @@ jobs:
           path: |
             build.log
             tree-info.txt
+            kernel-provenance.txt
           if-no-files-found: warn
           retention-days: 14
