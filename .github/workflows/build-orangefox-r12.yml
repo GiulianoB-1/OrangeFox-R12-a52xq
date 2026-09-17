@@ -216,6 +216,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          RECOVERY_KERNEL_RAW="$RUNNER_TEMP/orangefox-recovery-kernel-validate"
+          rm -f "$RECOVERY_KERNEL_RAW"
+          gzip -dc "$DEVICE_TREE/prebuilt/Image.gz" > "$RECOVERY_KERNEL_RAW"
+          test -s "$RECOVERY_KERNEL_RAW"
           {
             echo "Device tree commit:"
             git -C "$DEVICE_TREE" log -1 --oneline
@@ -224,11 +228,11 @@ jobs:
             cat "$GITHUB_WORKSPACE/kernel-provenance.txt"
             echo
             echo "Recovery kernel:"
-            RECOVERY_KERNEL="$(gzip -dc "$DEVICE_TREE/prebuilt/Image.gz" | strings | grep -m1 '^Linux version ' || true)"
+            RECOVERY_KERNEL="$(strings "$RECOVERY_KERNEL_RAW" | grep -m1 '^Linux version ' || true)"
             echo "$RECOVERY_KERNEL"
             [[ "$RECOVERY_KERNEL" == *"4.19.206"* ]]
-            gzip -dc "$DEVICE_TREE/prebuilt/Image.gz" | grep -aFq 'a52_ramoops_raw: captured 0x%llx-0x%llx before ramoops init'
-            gzip -dc "$DEVICE_TREE/prebuilt/Image.gz" | grep -aFq '/dev/a52_ramoops_raw ready, size=%u'
+            grep -aFq 'a52_ramoops_raw: captured 0x%llx-0x%llx before ramoops init' "$RECOVERY_KERNEL_RAW"
+            grep -aFq '/dev/a52_ramoops_raw ready, size=%u' "$RECOVERY_KERNEL_RAW"
             EXPECTED_GZ_SHA="$(awk -F= '$1=="recovery_prebuilt_sha256" {print $2}' "$GITHUB_WORKSPACE/kernel-provenance.txt")"
             ACTUAL_GZ_SHA="$(sha256sum "$DEVICE_TREE/prebuilt/Image.gz" | awk '{print $1}')"
             [[ -n "$EXPECTED_GZ_SHA" && "$EXPECTED_GZ_SHA" == "$ACTUAL_GZ_SHA" ]]
@@ -247,6 +251,7 @@ jobs:
               fi
             done
           } | tee "$GITHUB_WORKSPACE/tree-info.txt"
+          rm -f "$RECOVERY_KERNEL_RAW"
 
       - name: Build OrangeFox recovery image
         shell: bash
